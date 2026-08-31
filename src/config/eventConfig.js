@@ -1,9 +1,9 @@
 export const EVENT_CONFIG = {
   eventName: '日本酒 試飲＆ブレンド体験',
 
-  totalTickets: 20,
+  totalTickets: 30,
 
-  organizerTicket: 20,
+  organizerTicket: 30,
 
   baseAmount: 20,
 
