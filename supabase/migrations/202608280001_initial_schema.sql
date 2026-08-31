@@ -83,3 +83,76 @@ for update
 to authenticated
 using (true)
 with check (true);
+
+create table if not exists public.event_settings (
+  id integer primary key
+    check (id = 1),
+
+  participant_count integer not null default 30
+    check (
+      participant_count between 1 and 30
+    ),
+
+  organizer_ticket integer not null default 30
+    check (
+      organizer_ticket between 1 and 30
+    ),
+
+  updated_at timestamptz not null default now(),
+
+  constraint organizer_within_participant_count
+    check (
+      organizer_ticket <= participant_count
+    )
+);
+
+insert into public.event_settings (
+  id,
+  participant_count,
+  organizer_ticket
+)
+values (
+  1,
+  30,
+  30
+)
+on conflict (id) do nothing;
+
+alter table public.event_settings
+enable row level security;
+
+grant select
+on table public.event_settings
+to anon, authenticated;
+
+grant update
+on table public.event_settings
+to authenticated;
+
+revoke insert, update, delete
+on table public.event_settings
+from anon;
+
+create policy "participants_can_read_event_settings"
+on public.event_settings
+for select
+to anon
+using (id = 1);
+
+create policy "authenticated_users_can_read_event_settings"
+on public.event_settings
+for select
+to authenticated
+using (id = 1);
+
+create policy "authenticated_users_can_update_event_settings"
+on public.event_settings
+for update
+to authenticated
+using (id = 1)
+with check (
+  id = 1
+  and participant_count between 1 and 30
+  and organizer_ticket between 1
+    and participant_count
+);
