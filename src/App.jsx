@@ -6,7 +6,7 @@ const SAKE_OPTIONS = EVENT_CONFIG.items.map(item => item.id)
 const FLAVOR_AMOUNTS = EVENT_CONFIG.flavorAmounts
 const BASE_AMOUNT = EVENT_CONFIG.baseAmount
 const TOTAL_AMOUNT = EVENT_CONFIG.totalAmount
-const TOTAL_TICKETS = EVENT_CONFIG.totalTickets
+const MAX_TICKETS = 30
 const STORAGE_KEY = 'event-blend-answers-v1'
 
 function loadAnswers() {
@@ -90,6 +90,11 @@ export default function App() {
   const [presentationStep, setPresentationStep] = useState(0)
   const [presentationRevealed, setPresentationRevealed] = useState(false)
   const [presentationData, setPresentationData] = useState(null)
+  const [participantCount, setParticipantCount] = useState(EVENT_CONFIG.totalTickets)
+  const [participantCountInput, setParticipantCountInput] = useState(String(EVENT_CONFIG.totalTickets))
+  const [settingsLoading, setSettingsLoading] = useState(true)
+  const [settingsSaving, setSettingsSaving] = useState(false)
+  const [settingsMessage, setSettingsMessage] = useState('')
 
   const applyAnswerToForm = answer => {
     setForm({
@@ -102,10 +107,39 @@ export default function App() {
   }
 
   useEffect(() => {
+    const loadEventSettings = async () => {
+      if (!supabase) {
+        setSettingsLoading(false)
+        return
+      }
+
+      const { data, error } = await supabase
+        .from('event_settings')
+        .select('participant_count, organizer_ticket')
+        .eq('id', 1)
+        .maybeSingle()
+
+      if (error) {
+        console.error('イベント設定取得エラー:', error)
+        setAnswerLoadError('参加人数の設定を確認できませんでした。')
+      } else if (data) {
+        setParticipantCount(data.participant_count)
+        setParticipantCountInput(String(data.participant_count))
+      }
+
+      setSettingsLoading(false)
+    }
+
+    loadEventSettings()
+  }, [])
+
+  useEffect(() => {
+    if (settingsLoading) return
+
     const loadParticipantAnswer = async () => {
       const params = new URLSearchParams(window.location.search)
       const ticket = Number(params.get('ticket'))
-      if (!Number.isInteger(ticket) || ticket < 1 || ticket > TOTAL_TICKETS) return
+      if (!Number.isInteger(ticket) || ticket < 1 || ticket > participantCount) return
 
       setForm(prev => ({ ...prev, ticket: String(ticket) }))
       setTicketLocked(true)
@@ -135,8 +169,9 @@ export default function App() {
         setCompleted(true)
       }
     }
+
     loadParticipantAnswer()
-  }, [])
+  }, [settingsLoading, participantCount])
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(answers))
@@ -183,6 +218,52 @@ export default function App() {
     if (tab === 'admin' && session) fetchAnswers()
   }, [tab, session])
 
+  const saveParticipantCount = async () => {
+    const nextCount = Number(participantCountInput)
+    if (!Number.isInteger(nextCount) || nextCount < 1 || nextCount > MAX_TICKETS) {
+      setSettingsMessage('参加人数は1～30名で入力してください。')
+      return
+    }
+    if (!supabase || !session) {
+      setSettingsMessage('集計者としてログインしてください。')
+      return
+    }
+
+    const excludedTickets = answers
+      .filter(answer => answer.ticket > nextCount)
+      .map(answer => answer.ticket)
+      .sort((a, b) => a - b)
+
+    if (excludedTickets.length > 0) {
+      const proceed = window.confirm(
+        `札番号${excludedTickets.join('、')}に回答があります。参加人数を${nextCount}名に変更すると集計対象外になります。変更しますか？`
+      )
+      if (!proceed) return
+    }
+
+    setSettingsSaving(true)
+    setSettingsMessage('')
+    const { error } = await supabase
+      .from('event_settings')
+      .update({
+        participant_count: nextCount,
+        organizer_ticket: nextCount,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', 1)
+    setSettingsSaving(false)
+
+    if (error) {
+      console.error('参加人数設定エラー:', error)
+      setSettingsMessage(`参加人数を保存できませんでした。${error.message || ''}`)
+      return
+    }
+
+    setParticipantCount(nextCount)
+    setParticipantCountInput(String(nextCount))
+    setSettingsMessage(`参加人数を${nextCount}名に設定しました。主催者番号も${nextCount}番です。`)
+  }
+
   const login = async event => {
     event.preventDefault()
     if (!supabase) return setLoginError('データベース接続設定を確認してください。')
@@ -226,7 +307,7 @@ export default function App() {
   const selectedSakes = [Number(form.base), Number(form.second), Number(form.third)]
   const duplicateSake = new Set(selectedSakes).size !== 3
   const ticketNumber = Number(form.ticket)
-  const ticketValid = Number.isInteger(ticketNumber) && ticketNumber >= 1 && ticketNumber <= TOTAL_TICKETS
+  const ticketValid = Number.isInteger(ticketNumber) && ticketNumber >= 1 && ticketNumber <= participantCount
   const amountsValid = FLAVOR_AMOUNTS.includes(secondAmount) && FLAVOR_AMOUNTS.includes(thirdAmount)
   const valid = ticketValid && !duplicateSake && amountsValid && totalAmount === TOTAL_AMOUNT
 
@@ -305,25 +386,35 @@ export default function App() {
     setCompleted(true)
   }
 
+  const activeAnswers = useMemo(
+    () => answers.filter(answer => answer.ticket >= 1 && answer.ticket <= participantCount),
+    [answers, participantCount]
+  )
+
+  const excludedAnswers = useMemo(
+    () => answers.filter(answer => answer.ticket > participantCount).map(answer => answer.ticket).sort((a, b) => a - b),
+    [answers, participantCount]
+  )
+
   const baseGroups = useMemo(() => SAKE_OPTIONS.map(base => ({
     key: String(base), label: `${sakeName(base)} 20ml`,
-    tickets: answers.filter(a => a.base === base).map(a => a.ticket).sort((a, b) => a - b),
-  })).filter(group => group.tickets.length), [answers])
+    tickets: activeAnswers.filter(a => a.base === base).map(a => a.ticket).sort((a, b) => a - b),
+  })).filter(group => group.tickets.length), [activeAnswers])
 
   const sakeGroups = useMemo(() => {
     const map = new Map()
-    answers.forEach(answer => {
+    activeAnswers.forEach(answer => {
       const types = [answer.base, answer.second, answer.third].sort((a, b) => a - b)
       const key = types.join('-')
       if (!map.has(key)) map.set(key, { key, label: types.map(sakeName).join('・'), tickets: [] })
       map.get(key).tickets.push(answer.ticket)
     })
     return [...map.values()].filter(group => group.tickets.length >= 2)
-  }, [answers])
+  }, [activeAnswers])
 
   const exactGroups = useMemo(() => {
     const map = new Map()
-    answers.forEach(answer => {
+    activeAnswers.forEach(answer => {
       const ingredients = [[answer.base, BASE_AMOUNT], [answer.second, answer.secondAmount], [answer.third, answer.thirdAmount]].sort((a, b) => a[0] - b[0])
       const key = ingredients.map(([type, amount]) => `${type}:${amount}`).join('|')
       const label = ingredients.map(([type, amount]) => `${sakeName(type)} ${amount}ml`).join('、')
@@ -331,13 +422,13 @@ export default function App() {
       map.get(key).tickets.push(answer.ticket)
     })
     return [...map.values()].filter(group => group.tickets.length >= 2)
-  }, [answers])
+  }, [activeAnswers])
 
   const basePopularity = useMemo(() => {
-    if (answers.length === 0) return { winners: [], votes: 0 }
+    if (activeAnswers.length === 0) return { winners: [], votes: 0 }
 
     const counts = new Map()
-    answers.forEach(answer => {
+    activeAnswers.forEach(answer => {
       counts.set(answer.base, (counts.get(answer.base) || 0) + 1)
     })
 
@@ -348,13 +439,13 @@ export default function App() {
       .sort((a, b) => a - b)
 
     return { winners, votes }
-  }, [answers])
+  }, [activeAnswers])
 
   const flavorPopularity = useMemo(() => {
-    if (answers.length === 0) return { winners: [], votes: 0 }
+    if (activeAnswers.length === 0) return { winners: [], votes: 0 }
 
     const counts = new Map()
-    answers.forEach(answer => {
+    activeAnswers.forEach(answer => {
       ;[answer.second, answer.third].forEach(number => {
         counts.set(number, (counts.get(number) || 0) + 1)
       })
@@ -367,16 +458,16 @@ export default function App() {
       .sort((a, b) => a - b)
 
     return { winners, votes }
-  }, [answers])
+  }, [activeAnswers])
 
   const unansweredTickets = useMemo(() => {
-    const answered = new Set(answers.map(answer => Number(answer.ticket)))
-    return Array.from({ length: TOTAL_TICKETS }, (_, i) => i + 1).filter(ticket => !answered.has(ticket))
-  }, [answers])
+    const answered = new Set(activeAnswers.map(answer => Number(answer.ticket)))
+    return Array.from({ length: participantCount }, (_, i) => i + 1).filter(ticket => !answered.has(ticket))
+  }, [activeAnswers])
 
   const openPresentation = () => {
     setPresentationData({
-      answeredCount: answers.length,
+      answeredCount: activeAnswers.length,
       basePopularity,
       flavorPopularity,
       sakeGroups: sakeGroups.map(group => ({ ...group, tickets: [...group.tickets] })),
@@ -469,7 +560,7 @@ export default function App() {
     )
   }
 
-  if (checkingAnswer) return <main className="app-shell center-screen"><section className="card success-card"><h1>回答状況を確認しています</h1><p className="muted">少しお待ちください。</p></section></main>
+  if (settingsLoading || checkingAnswer) return <main className="app-shell center-screen"><section className="card success-card"><h1>回答状況を確認しています</h1><p className="muted">少しお待ちください。</p></section></main>
 
   if (completed && existingAnswer) {
     return (
@@ -505,7 +596,7 @@ export default function App() {
           {answerLoadError && <p className="error panel">{answerLoadError}</p>}
           <div className="field">
             <label htmlFor="ticket">札番号</label>
-            {ticketLocked ? <div className="locked-ticket"><span>固有QRから読み取りました</span><strong>{form.ticket}</strong><small>手元の札と同じ番号か確認してください</small></div> : <><p className="helper">マスターQRから開いた場合は、札番号を手入力してください。</p><input id="ticket" type="number" inputMode="numeric" min="1" max={TOTAL_TICKETS} value={form.ticket} onChange={e => update('ticket', e.target.value)} placeholder={`1から${TOTAL_TICKETS}`} /></>}
+            {ticketLocked ? <div className="locked-ticket"><span>固有QRから読み取りました</span><strong>{form.ticket}</strong><small>手元の札と同じ番号か確認してください</small></div> : <><p className="helper">マスターQRから開いた場合は、札番号を手入力してください。</p><input id="ticket" type="number" inputMode="numeric" min="1" max={participantCount} value={form.ticket} onChange={e => update('ticket', e.target.value)} placeholder={`1から${participantCount}`} /></>}
           </div>
 
           <div className="blend-grid">
@@ -534,7 +625,31 @@ export default function App() {
       ) : (
         <div className="admin-area">
           <div className="admin-header-actions"><p className="admin-user">集計者としてログイン中</p><button className="secondary compact" type="button" onClick={logout}>ログアウト</button></div>
-          <section className="stats"><div className="stat-card"><strong>{TOTAL_TICKETS}</strong><span>全札数</span></div><div className="stat-card"><strong>{answers.length}</strong><span>回答済み</span></div><div className="stat-card"><strong>{unansweredTickets.length}</strong><span>未回答</span></div></section>
+          <section className="card group-card">
+            <h2>イベント設定</h2>
+            <p className="muted">最大30名。主催者番号は参加人数と同じ番号に自動設定されます。</p>
+            <div className="field">
+              <label htmlFor="participant-count">今回の参加人数</label>
+              <input
+                id="participant-count"
+                type="number"
+                inputMode="numeric"
+                min="1"
+                max={MAX_TICKETS}
+                value={participantCountInput}
+                onChange={event => {
+                  setParticipantCountInput(event.target.value)
+                  setSettingsMessage('')
+                }}
+              />
+            </div>
+            <button className="primary" type="button" onClick={saveParticipantCount} disabled={settingsSaving}>
+              {settingsSaving ? '保存中...' : '参加人数を保存'}
+            </button>
+            {settingsMessage && <p className="message">{settingsMessage}</p>}
+            {excludedAnswers.length > 0 && <p className="error panel">集計対象外の回答：札番号 {excludedAnswers.join('、')}</p>}
+          </section>
+          <section className="stats"><div className="stat-card"><strong>{participantCount}</strong><span>全札数</span></div><div className="stat-card"><strong>{activeAnswers.length}</strong><span>回答済み</span></div><div className="stat-card"><strong>{unansweredTickets.length}</strong><span>未回答</span></div></section>
           <div className="summary-actions"><div><p className="notice">Supabaseに保存された全端末の回答を表示します。</p><p className="muted">最終読み込み：{formatDateTime(lastFetchedAt)}</p></div><button className="secondary compact" type="button" onClick={fetchAnswers} disabled={loadingAnswers}>{loadingAnswers ? '読み込み中...' : '最新の回答に更新'}</button></div>
           <button className="primary presentation-launch" type="button" onClick={openPresentation} disabled={answers.length === 0}>発表モードを開く</button>
           <section className="stats popularity-stats">
